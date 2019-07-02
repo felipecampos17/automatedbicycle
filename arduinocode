@@ -1,0 +1,346 @@
+// ========================================================================================================
+// --- Câmbio automático para uma bicicleta, utilizando servo motor ---
+// ========================================================================================================
+
+// ========================================================================================================
+// --- Bibliotecas ---
+// ========================================================================================================
+#include <Servo.h> //Biblioteca para controle de um servo motor
+#include <EEPROM.h> //biblioteca para armazenamento em memória não volátio
+
+// ========================================================================================================
+// --- Constantes ---
+// ========================================================================================================
+
+const int PINO_SERVO_MOTOR = 8;  //Pino da saída digital o qual vai ser ligado o servo motor
+const int ENCODER_TRAS = 2;  //Somente as entradas digitais 2 ou 3
+const int ENCODER_DIA = 3; //Somente as entradas digitais 2 ou 3
+const int ANGULO_1 = 5; //Ângulo para essa coroa
+const int ANGULO_2 = 35;
+const int ANGULO_3 = 60;
+const int ANGULO_4 = 85;
+const int ANGULO_5 = 115;
+const int ANGULO_6 = 140;
+const int ANGULO_7 = 175;
+
+// ========================================================================================================
+// --- Declaração de Objetos ---
+// ========================================================================================================
+
+Servo servo_motor;  //Defini um nome para o servo motor
+
+// ========================================================================================================
+// --- Variáveis ---
+// ========================================================================================================
+int rpm_tras;
+int rpm_dia;
+int ultimaVelocidade = 0;
+int atualVelocidade = 0;
+bool MiddleEncoder = true;
+int ShiftMaxNumber = 7;
+int CurrentShift = 0;
+int fakeshift = 0;
+int addr = 0 ; //Posição de gravação na memória EEPROM
+int angulo = 0; // Posição do servo motor
+int mov_angulo = 10; //Ajuste de quantos graus para movimentação são necessários para mudar de catraca
+
+volatile byte pulsos_tras; //variável para contagem de pulsos, para garantir que as variáveis ​​compartilhadas entre um ISR(função pequena sem retorno) e o programa principal sejam atualizadas corretamente, é declarada como volatile.
+volatile byte pulsos_dia; 
+unsigned long timeold_tras; //int no que esses também armazenam um valor de 2 bytes. Em vez de guardar números negativos, no entanto, esses apenas armazenam valores positivos, garantindo um intervalo útil de 0 a 65,535.
+unsigned long timeold_dia;
+unsigned int pulsos_por_volta_tras = 1;  //Altere o numero abaixo de acordo com o seu disco encoder
+unsigned int pulsos_por_volta_dia = 48;
+
+
+// ========================================================================================================
+// --- Funções ---
+
+//Contar o passos para calcular rpm traseiro
+void contadorTRAS()
+{
+   //Incrementa contador
+   pulsos_tras++;
+}
+
+//Contar o passos para calcular rpm dianteiro
+void contadorDIA()
+{
+  //Incrementa contador
+  pulsos_dia++;
+}
+
+//Processa a velocidade para configurar uma troca de marcha
+void ProcessSpeed(int rpm_tras)
+{
+  if (rpm_tras > 0 && rpm_tras < 200)
+  {
+    trocaMarcha(0,ANGULO_1);
+    logString("Processa RPM - Marcha sugerida = 1");
+  }
+
+  if (rpm_tras > 200 && rpm_tras < 400)
+  {
+    trocaMarcha(10,ANGULO_2);
+    logString("Processa RPM - Marcha sugerida = 2");
+  }
+
+  if (rpm_tras > 400 && rpm_tras < 500)
+  {
+    trocaMarcha(20,ANGULO_3);
+    logString("Processa RPM - Marcha sugerida = 3");
+  }
+
+  if (rpm_tras > 500 && rpm_tras < 600)
+  {
+    trocaMarcha(30,ANGULO_4);
+    logString("Processa RPM - Marcha sugerida = 4");
+  }
+
+  if (rpm_tras > 600 && rpm_tras < 700)
+  {
+    trocaMarcha(40,ANGULO_5);
+    logString("Processa RPM - Marcha sugerida = 5");
+  }
+  
+  if (rpm_tras > 700 && rpm_tras < 800)
+  {
+    trocaMarcha(50, ANGULO_6);
+    logString("Processa RPM - Marcha sugerida = 6");
+  }
+  
+  if (rpm_tras > 800)
+  {
+    trocaMarcha(60,ANGULO_7);
+    logString("Processa RPM - Marcha sugerida = 7");
+  }
+}
+
+//Função para definir movimentos de troca de marcha no câmbio
+void trocaMarcha(int velocidade, int angulo)
+{
+  atualVelocidade = velocidade;  
+  logNumber("Atual velocidade = ",atualVelocidade);
+  logNumber("Ultima velocidade = ",ultimaVelocidade);
+
+  if (ultimaVelocidade < atualVelocidade)
+  {
+    logNumber("MiddleEncoder(Subir)",MiddleEncoder);
+    if (MiddleEncoder == true)
+    {
+      shift("UP", angulo);
+      logNumber("Envia subir marcha =>",angulo);
+    }
+    else
+    {
+      fakeshift ++;
+    }
+    ultimaVelocidade = atualVelocidade;
+  }
+
+  if (ultimaVelocidade > atualVelocidade)
+  {
+    logNumber("MiddleEncoder(Descer)",MiddleEncoder);
+    if (MiddleEncoder == true)
+    {
+      shift("DOWN", angulo);
+      logNumber("Envia descer marcha =>", angulo);
+    }
+    else
+    {
+      fakeshift --;
+    }
+    ultimaVelocidade = atualVelocidade;
+  }
+
+  //Corrige ultima velocidade na primeira execução
+  if (ultimaVelocidade == 0) {
+    ultimaVelocidade = atualVelocidade;
+  }
+}
+
+//Realiza a troca da marcha
+void shift(String command, int angulo)
+{
+  if (command == "UP")
+  {
+    servo_motor.write(angulo);
+    CurrentShift ++;
+    logNumber("SUBIU MARCHA = ",angulo);
+    logNumber("Marcha atual = ",CurrentShift);
+    EEPROM.write ( addr , CurrentShift ); 
+  }
+  
+  if (command == "DOWN")
+  {
+    servo_motor.write(angulo);
+    CurrentShift --;
+    logNumber("DESCEU MARCHA = ",angulo);
+    logNumber("Marcha atual = ",CurrentShift);
+    EEPROM.write ( addr , CurrentShift);
+  }
+}
+
+
+//Função corrige marcha quando o ciclista volta a pedalar
+void updateShift(int FakeShift)
+{
+  int ang;
+    int s = CurrentShift + FakeShift;
+    switch(s)
+    {
+    case 0:ang = ANGULO_1;break;
+    case 1:ang = ANGULO_2;break;
+    case 2:ang = ANGULO_3;break;
+    case 3:ang = ANGULO_4;break;
+    case 4:ang = ANGULO_5;break;
+    case 5:ang = ANGULO_6;break;
+    case 6:ang = ANGULO_7;break;
+    } 
+  logNumber("Acionou correção correção de marcha, pois pedal está parado. Marcha registrada = ",FakeShift);
+  if (FakeShift > 0)
+  {
+    ang = ang/FakeShift;
+    for (int i = 0; i < FakeShift; i++)
+    {
+      shift("UP",ang);
+    }
+  }
+  if (FakeShift < 0)
+  {
+    FakeShift * (-1);
+    ang = ang/FakeShift;
+    for (int i = 0; i < FakeShift; i++)
+    {
+      shift("DOWN",ang);
+    }
+  }
+  FakeShift = 0;
+}
+
+   //------------------------------------------------------------------------------------
+   //-Funções para gerar log de maneira padronizada, bastar chama-las e passar quais parâmetros quer logar
+   //------------------------------------------------------------------------------------
+
+//Função para criar log no monitor serial
+void logNumber(String description, int variable)
+    {
+      Serial.print(description);
+      Serial.println(variable, DEC);
+    }
+
+//Função para criar log sem dados numéricos no monitor serial
+void logString(String description)
+    {
+      Serial.println(description);
+    }
+    
+// ========================================================================================================
+// --- Configurações Iniciais ---
+// ========================================================================================================
+void setup()
+{
+   //------------------------------------------------------------------------------------
+   //-------Definição dos pinos da placa do arduino se é de entrada ou saída
+   //------------------------------------------------------------------------------------
+  Serial.begin(115200);
+  pinMode(ENCODER_TRAS, INPUT);
+  pinMode(ENCODER_DIA, INPUT);
+  servo_motor.attach(PINO_SERVO_MOTOR);
+
+   //------------------------------------------------------------------------------------
+   //Ao iniciar o arduino, ele lê a memória não volátio para identificar qual marcha estava antes de desligar
+   //------------------------------------------------------------------------------------
+
+  //Define qual marcha parou
+  CurrentShift = EEPROM.read(addr);
+  logNumber("Atualizou qual marcha parou = ",CurrentShift);
+
+
+  
+  //Interrupcao 0 - pino digital 2
+  //Aciona o contador a cada pulso
+  attachInterrupt(0, contadorTRAS, RISING); //(pino, função a ser chamada, condição para chamar função)
+  pulsos_tras  = 0;
+  rpm_tras     = 0;
+  timeold_tras = 0;
+
+
+  //Interrupcao 0 - pino digital 9
+  //Aciona o contador a cada pulso
+  attachInterrupt(1, contadorDIA, RISING); //(pino, função a ser chamada, condição para chamar função)
+  pulsos_dia  = 0;
+  rpm_dia     = 0;
+  timeold_dia = 0;
+}
+
+// ========================================================================================================
+// --- Loop Infinito ---
+void loop()
+{
+   //------------------------------------------------------------------------------------
+   //------------Lógica de leitura de velocidade do encoder traseiro
+   //------------------------------------------------------------------------------------
+ 
+  //Atualiza contadorTRAS a cada segundo
+  if (millis() - timeold_tras >= 1000)
+  {
+    //Desabilita interrupcao durante o calculo
+    detachInterrupt(0);
+    rpm_tras = (60 * 1000 / pulsos_por_volta_tras ) / (millis() - timeold_tras) * pulsos_tras;
+    
+    //Chama função de processar velocidade
+    ProcessSpeed(rpm_tras);
+    
+    //Redefine valores das variáveis
+    timeold_tras = millis();
+    pulsos_tras = 0;
+
+    //Mostra o valor de rpm_tras no serial monitor
+    logNumber("RPM_TRAS = ",rpm_tras);
+     
+    //Habilita interrupcao
+    attachInterrupt(0, contadorTRAS, RISING);
+    }
+
+    //------------------------------------------------------------------------------------
+   //------------Lógica de leitura de velocidade do encoder dianteiro
+   //------------------------------------------------------------------------------------
+
+    //Atualiza contadorDIA a cada segundo
+    if (millis() - timeold_dia >= 1000)
+    {
+    //Desabilita interrupcao durante o calculo
+    detachInterrupt(1);
+    rpm_dia = (60 * 1000 / pulsos_por_volta_dia ) / (millis() - timeold_dia) * pulsos_dia;
+
+
+    //Lê o valor de rpm do servo dianteiro, para verificar se o ciclista está pedalando ou não
+    if(rpm_dia>2)
+    {
+      MiddleEncoder = true;
+      logString("PEDALANDO = TRUE");
+      
+      //Verifica se a marcha fake é diferente de zero e da atual
+      if(fakeshift != 0 && fakeshift != CurrentShift)
+      {
+         logNumber("Função de atualização de marcha acionada. Marcha corrigida para = ", fakeshift);
+         updateShift(fakeshift);
+      }
+    }
+    else
+    {
+      MiddleEncoder = false;
+      logString("PEDALANDO = FALSE");
+    }
+            
+    //Redefine valores das variáveis
+    timeold_dia = millis();
+    pulsos_dia = 0;
+
+    //Mostra o valor de rpm_tras no serial monitor
+    logNumber("rpm_dia = ",rpm_dia);
+     
+    //Habilita interrupcao
+    attachInterrupt(1, contadorDIA, RISING);
+    }
+}
